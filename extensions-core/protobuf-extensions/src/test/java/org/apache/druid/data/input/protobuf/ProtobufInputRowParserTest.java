@@ -53,6 +53,9 @@ public class ProtobufInputRowParserTest
   public ExpectedException expectedException = ExpectedException.none();
 
   private ParseSpec parseSpec;
+  private DateTime dateTime;
+  private ProtoTestEventWrapper.ProtoTestEvent event;
+  private ProtoTestEventWrapper.ProtoTestEvent event2;
 
   @Before
   public void setUp()
@@ -75,6 +78,35 @@ public class ProtobufInputRowParserTest
         ), null
     );
 
+    //create binary of proto test event
+    dateTime = new DateTime(2012, 07, 12, 9, 30, ISOChronology.getInstanceUTC());
+    event = ProtoTestEventWrapper.ProtoTestEvent.newBuilder()
+      .setDescription("description")
+      .setEventType(ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_ONE)
+      .setId(4711L)
+      .setIsValid(true)
+      .setSomeOtherId(4712)
+      .setTimestamp(dateTime.toString())
+      .setSomeFloatColumn(47.11F)
+      .setSomeIntColumn(815)
+      .setSomeLongColumn(816L)
+      .setFoo(ProtoTestEventWrapper.ProtoTestEvent.Foo
+        .newBuilder()
+        .setBar("baz"))
+      .addBar(ProtoTestEventWrapper.ProtoTestEvent.Foo
+        .newBuilder()
+        .setBar("bar0"))
+      .addBar(ProtoTestEventWrapper.ProtoTestEvent.Foo
+        .newBuilder()
+        .setBar("bar1"))
+      .build();
+
+    event2 = ProtoTestEventWrapper.ProtoTestEvent.newBuilder()
+      .setDescription("description2")
+      .setEventType(ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_TWO)
+      .setId(2222L)
+      .setTimestamp(dateTime.toString())
+      .build();
   }
 
   @Test
@@ -82,7 +114,7 @@ public class ProtobufInputRowParserTest
   {
     //configure parser with desc file, and specify which file name to use
     @SuppressWarnings("unused") // expected to create parser without exception
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent");
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent", false);
     parser.initDescriptor();
   }
 
@@ -92,7 +124,7 @@ public class ProtobufInputRowParserTest
   {
     //configure parser with desc file, and specify which file name to use
     @SuppressWarnings("unused") // expected to create parser without exception
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "prototest.ProtoTestEvent");
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "prototest.ProtoTestEvent", false);
     parser.initDescriptor();
   }
 
@@ -102,7 +134,7 @@ public class ProtobufInputRowParserTest
   {
     //configure parser with desc file
     @SuppressWarnings("unused") // expected exception
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "BadName");
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "BadName", false);
     parser.initDescriptor();
   }
 
@@ -111,7 +143,7 @@ public class ProtobufInputRowParserTest
   {
     //configure parser with non existent desc file
     @SuppressWarnings("unused") // expected exception
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "file:/nonexist.desc", "BadName");
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "file:/nonexist.desc", "BadName", false);
     parser.initDescriptor();
   }
 
@@ -120,7 +152,7 @@ public class ProtobufInputRowParserTest
   {
     // For the backward compatibility, protoMessageType allows null when the desc file has only one message type.
     @SuppressWarnings("unused") // expected to create parser without exception
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", null);
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", null, false);
     parser.initDescriptor();
   }
 
@@ -128,44 +160,16 @@ public class ProtobufInputRowParserTest
   public void testParse() throws Exception
   {
 
-    //configure parser with desc file
-    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent");
-
-    //create binary of proto test event
-    DateTime dateTime = new DateTime(2012, 07, 12, 9, 30, ISOChronology.getInstanceUTC());
-    ProtoTestEventWrapper.ProtoTestEvent event = ProtoTestEventWrapper.ProtoTestEvent.newBuilder()
-                                                                                     .setDescription("description")
-                                                                                     .setEventType(ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_ONE)
-                                                                                     .setId(4711L)
-                                                                                     .setIsValid(true)
-                                                                                     .setSomeOtherId(4712)
-                                                                                     .setTimestamp(dateTime.toString())
-                                                                                     .setSomeFloatColumn(47.11F)
-                                                                                     .setSomeIntColumn(815)
-                                                                                     .setSomeLongColumn(816L)
-                                                                                     .setFoo(ProtoTestEventWrapper.ProtoTestEvent.Foo
-                                                                                                 .newBuilder()
-                                                                                                 .setBar("baz"))
-                                                                                     .addBar(ProtoTestEventWrapper.ProtoTestEvent.Foo
-                                                                                                 .newBuilder()
-                                                                                                 .setBar("bar0"))
-                                                                                     .addBar(ProtoTestEventWrapper.ProtoTestEvent.Foo
-                                                                                                 .newBuilder()
-                                                                                                 .setBar("bar1"))
-                                                                                     .build();
 
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     event.writeTo(out);
 
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent", false);
     InputRow row = parser.parseBatch(ByteBuffer.wrap(out.toByteArray())).get(0);
     System.out.println(row);
 
     assertEquals(dateTime.getMillis(), row.getTimestampFromEpoch());
 
-    assertDimensionEquals(row, "id", "4711");
-    assertDimensionEquals(row, "isValid", "true");
-    assertDimensionEquals(row, "someOtherId", "4712");
-    assertDimensionEquals(row, "description", "description");
 
     assertDimensionEquals(row, "eventType", ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_ONE.name());
     assertDimensionEquals(row, "foobar", "baz");
@@ -175,6 +179,47 @@ public class ProtobufInputRowParserTest
     assertEquals(47.11F, row.getMetric("someFloatColumn").floatValue(), 0.0);
     assertEquals(815.0F, row.getMetric("someIntColumn").floatValue(), 0.0);
     assertEquals(816.0F, row.getMetric("someLongColumn").floatValue(), 0.0);
+  }
+
+  @Test
+  public void testParseLengthDelimited() throws Exception
+  {
+
+
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    // Like writeTo(OutputStream), but writes the size of the message as a varint before writing the data.
+    event.writeDelimitedTo(out);
+    // write another message in the single blob to see if parser returns two rows.
+    event2.writeDelimitedTo(out);
+
+    //configure parser with desc file
+    ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent", true);
+    List<InputRow> inputRows = parser.parseBatch(ByteBuffer.wrap(out.toByteArray()));
+
+    assertEquals(2, inputRows.size());
+
+    InputRow row0 = inputRows.get(0);
+    assertEquals(dateTime.getMillis(), row0.getTimestampFromEpoch());
+
+    assertDimensionEquals(row0, "id", "4711");
+    assertDimensionEquals(row0, "isValid", "true");
+    assertDimensionEquals(row0, "someOtherId", "4712");
+    assertDimensionEquals(row0, "description", "description");
+
+    assertDimensionEquals(row0, "eventType", ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_ONE.name());
+    assertDimensionEquals(row0, "foobar", "baz");
+    assertDimensionEquals(row0, "bar0", "bar0");
+
+
+    assertEquals(47.11F, row0.getMetric("someFloatColumn").floatValue(), 0.0);
+    assertEquals(815.0F, row0.getMetric("someIntColumn").floatValue(), 0.0);
+    assertEquals(816.0F, row0.getMetric("someLongColumn").floatValue(), 0.0);
+
+
+    InputRow row1 = inputRows.get(1);
+    assertDimensionEquals(row1, "id", "2222");
+    assertDimensionEquals(row1, "description", "description2");
+    assertDimensionEquals(row1, "eventType", ProtoTestEventWrapper.ProtoTestEvent.EventCategory.CATEGORY_TWO.name());
   }
 
   @Test
@@ -195,7 +240,7 @@ public class ProtobufInputRowParserTest
         "func",
         new JavaScriptConfig(false)
     );
-    final ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent");
+    final ProtobufInputRowParser parser = new ProtobufInputRowParser(parseSpec, "prototest.desc", "ProtoTestEvent", false);
 
     expectedException.expect(CoreMatchers.instanceOf(IllegalStateException.class));
     expectedException.expectMessage("JavaScript is disabled");

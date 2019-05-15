@@ -36,6 +36,7 @@ import org.apache.druid.data.input.ByteBufferInputRowParser;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.data.input.impl.ParseSpec;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.java.util.common.parsers.Parser;
@@ -44,7 +45,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -54,6 +57,7 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
   private final ParseSpec parseSpec;
   private final String descriptorFilePath;
   private final String protoMessageType;
+  private final Boolean isLengthDelimited;
   private Descriptor descriptor;
   private Parser<String, Object> parser;
   private final List<String> dimensions;
@@ -62,12 +66,14 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
   public ProtobufInputRowParser(
       @JsonProperty("parseSpec") ParseSpec parseSpec,
       @JsonProperty("descriptor") String descriptorFilePath,
-      @JsonProperty("protoMessageType") String protoMessageType
+      @JsonProperty("protoMessageType") String protoMessageType,
+      @JsonProperty("isLengthDelimited") Boolean isLengthDelimited
   )
   {
     this.parseSpec = parseSpec;
     this.descriptorFilePath = descriptorFilePath;
     this.protoMessageType = protoMessageType;
+    this.isLengthDelimited = isLengthDelimited;
     this.dimensions = parseSpec.getDimensionsSpec().getDimensionNames();
   }
 
@@ -80,7 +86,7 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
   @Override
   public ProtobufInputRowParser withParseSpec(ParseSpec parseSpec)
   {
-    return new ProtobufInputRowParser(parseSpec, descriptorFilePath, protoMessageType);
+    return new ProtobufInputRowParser(parseSpec, descriptorFilePath, protoMessageType, isLengthDelimited);
   }
 
   @VisibleForTesting
@@ -89,6 +95,50 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
     if (this.descriptor == null) {
       this.descriptor = getDescriptor(descriptorFilePath);
     }
+  }
+
+  private InputRow parseInput(ByteBuffer input)
+  {
+    String json;
+    try {
+      DynamicMessage message = DynamicMessage.parseFrom(descriptor, ByteString.copyFrom(input));
+      json = JsonFormat.printer().print(message);
+    }
+    catch (InvalidProtocolBufferException e) {
+      throw new ParseException(e, "Protobuf message could not be parsed");
+    }
+    return parseJson(json);
+  }
+
+  private InputRow parseInput(ByteBuffer input, int size)
+  {
+    String json;
+    try {
+      DynamicMessage message = DynamicMessage.parseFrom(descriptor, ByteString.copyFrom(input, size));
+      json = JsonFormat.printer().print(message);
+    }
+    catch (InvalidProtocolBufferException e) {
+      throw new ParseException(e, "Protobuf message could not be parsed");
+    }
+    return parseJson(json);
+  }
+
+  private InputRow parseJson(String json)
+  {
+    Map<String, Object> record = parser.parseToMap(json);
+    final List<String> dimensions;
+    if (!this.dimensions.isEmpty()) {
+      dimensions = this.dimensions;
+    } else {
+      dimensions = Lists.newArrayList(
+          Sets.difference(record.keySet(), parseSpec.getDimensionsSpec().getDimensionExclusions())
+      );
+    }
+    return new MapBasedInputRow(
+        parseSpec.getTimestampSpec().extractTimestamp(record),
+        dimensions,
+        record
+    );
   }
 
   @Override
@@ -100,29 +150,37 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
       parser = parseSpec.makeParser();
       initDescriptor();
     }
-    String json;
-    try {
-      DynamicMessage message = DynamicMessage.parseFrom(descriptor, ByteString.copyFrom(input));
-      json = JsonFormat.printer().print(message);
-    }
-    catch (InvalidProtocolBufferException e) {
-      throw new ParseException(e, "Protobuf message could not be parsed");
-    }
 
-    Map<String, Object> record = parser.parseToMap(json);
-    final List<String> dimensions;
-    if (!this.dimensions.isEmpty()) {
-      dimensions = this.dimensions;
+    List<InputRow> rows = new ArrayList<InputRow>();
+    ImmutableList ret;
+    if (this.isLengthDelimited) {
+      while (true) {
+        int firstByte;
+        try {
+          firstByte = input.get();
+        }
+        catch (BufferUnderflowException e) {
+          break;
+        }
+
+        if (firstByte == -1) {
+          throw new ParseException("Malformed length delimited Protobuf error");
+        }
+
+        int bodyLength;
+        try {
+          bodyLength = readRawVarint32(firstByte, input);
+        }
+        catch (IAE e) {
+          throw new ParseException(e, "Malformed length headerLength delimited Protobuf parse error");
+        }
+        rows.add(parseInput(input, bodyLength));
+      }
+      ret = ImmutableList.copyOf(rows);
     } else {
-      dimensions = Lists.newArrayList(
-          Sets.difference(record.keySet(), parseSpec.getDimensionsSpec().getDimensionExclusions())
-      );
+      ret = ImmutableList.of(parseInput(input));
     }
-    return ImmutableList.of(new MapBasedInputRow(
-        parseSpec.getTimestampSpec().extractTimestamp(record),
-        dimensions,
-        record
-    ));
+    return ret;
   }
 
   private Descriptor getDescriptor(String descriptorFilePath)
@@ -174,5 +232,43 @@ public class ProtobufInputRowParser implements ByteBufferInputRowParser
       );
     }
     return desc;
+  }
+
+  private int readRawVarint32(int firstByte, ByteBuffer input) throws IAE
+  {
+    if ((firstByte & 128) == 0) {
+      return firstByte;
+    } else {
+      int result = firstByte & 127;
+
+      int offset;
+      int b;
+      for (offset = 7; offset < 32; offset += 7) {
+        b = input.get();
+        if (b == -1) {
+          throw new IAE(StringUtils.format("Invalid VarInt32. -1 was found at offset %d", input.position()));
+        }
+
+        result |= (b & 127) << offset;
+        if ((b & 128) == 0) {
+          return result;
+        }
+      }
+
+      while (offset < 64) {
+        b = input.get();
+        if (b == -1) {
+          throw new IAE(StringUtils.format("Invalid VarInt32. -1 was found at offset %d", input.position()));
+        }
+
+        if ((b & 128) == 0) {
+          return result;
+        }
+
+        offset += 7;
+      }
+
+      throw new IAE("Invalid VarInt32. Too big for int32");
+    }
   }
 }
